@@ -1,0 +1,52 @@
+name: DOCAI Automation Pipeline
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    # Runs daily at 8:00 AM IST (2:30 UTC)
+    - cron: '30 2 * * *'
+  workflow_dispatch:  # allow manual trigger
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+
+      - name: Run daily news updater
+        run: |
+          python -c "
+import streamlit as st
+import feedparser
+import json
+news = feedparser.parse('https://www.who.int/rss-feeds/news-english.xml')
+items = [{'title': e.title, 'summary': e.summary[:150], 'link': e.link} for e in news.entries[:5]]
+with open('latest_news.json', 'w') as f:
+    json.dump(items, f)
+print('News updated')
+"
+
+      - name: Commit and push news if changed
+        run: |
+          git config user.name github-actions
+          git config user.email github-actions@github.com
+          git add latest_news.json
+          git diff --cached --quiet || git commit -m "Auto-update daily news"
+          git push
+
+      - name: Deploy to Streamlit Cloud (webhook)
+        run: |
+          curl -X POST "https://api.streamlit.io/v1/deploy" \
+            -H "Authorization: Bearer ${{ secrets.STREAMLIT_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            -d '{"repo": "Aryansethop/docai-app", "branch": "main"}'
