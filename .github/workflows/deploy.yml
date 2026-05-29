@@ -1,52 +1,89 @@
-name: DOCAI Automation Pipeline
+name: DOCAI Complete Automation
 
 on:
   push:
     branches: [main]
   schedule:
-    # Runs daily at 8:00 AM IST (2:30 UTC)
-    - cron: '30 2 * * *'
-  workflow_dispatch:  # allow manual trigger
+    - cron: '*/30 * * * *'   # Every 30 minutes for reminders
+    - cron: '0 2 * * *'       # Daily backup at 2 AM
+    - cron: '*/15 * * * *'    # Uptime check every 15 minutes
+  workflow_dispatch:
 
 jobs:
-  build-and-deploy:
+  reminders:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: '3.10'
+      - run: pip install -r requirements.txt
+      - name: Send medication reminders
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          EMAIL_FROM: ${{ secrets.EMAIL_FROM }}
+          EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
+        run: python scripts/reminder_checker.py
 
-      - name: Install dependencies
+  backup:
+    runs-on: ubuntu-latest
+    if: github.event.schedule == '0 2 * * *' || github.event_name == 'workflow_dispatch'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      - run: pip install -r requirements.txt
+      - name: Backup Supabase
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+        run: python scripts/backup_db.py
+      - name: Commit backup file
         run: |
-          pip install -r requirements.txt
+          git config user.name github-actions
+          git config user.email github-actions@github.com
+          git add supabase_backup.json
+          git diff --quiet && git diff --staged --quiet || git commit -m "Auto backup $(date +'%Y-%m-%d')"
+          git push
 
-      - name: Run daily news updater
+  uptime:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      - run: pip install -r requirements.txt
+      - name: Check app health
+        env:
+          APP_URL: ${{ secrets.APP_URL }}
+          EMAIL_FROM: ${{ secrets.EMAIL_FROM }}
+          EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
+          ALERT_EMAIL: ${{ secrets.ALERT_EMAIL }}
+        run: python scripts/uptime_monitor.py
+
+  news:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      - run: pip install -r requirements.txt
+      - name: Fetch WHO news
         run: |
           python -c "
-import streamlit as st
-import feedparser
-import json
+import feedparser, json
 news = feedparser.parse('https://www.who.int/rss-feeds/news-english.xml')
 items = [{'title': e.title, 'summary': e.summary[:150], 'link': e.link} for e in news.entries[:5]]
 with open('latest_news.json', 'w') as f:
-    json.dump(items, f)
-print('News updated')
-"
-
-      - name: Commit and push news if changed
+    json.dump(items, f)"
+      - name: Commit news
         run: |
           git config user.name github-actions
           git config user.email github-actions@github.com
           git add latest_news.json
-          git diff --cached --quiet || git commit -m "Auto-update daily news"
+          git diff --quiet && git diff --staged --quiet || git commit -m "Daily news update"
           git push
-
-      - name: Deploy to Streamlit Cloud (webhook)
-        run: |
-          curl -X POST "https://api.streamlit.io/v1/deploy" \
-            -H "Authorization: Bearer ${{ secrets.STREAMLIT_TOKEN }}" \
-            -H "Content-Type: application/json" \
-            -d '{"repo": "Aryansethop/docai-app", "branch": "main"}'
